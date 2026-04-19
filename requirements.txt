@@ -1,0 +1,12 @@
+torch
+transformers
+psutil
+numpy 
+pandas
+torch
+transformers
+datasets
+huggingface_hub
+tqdm
+sympy
+pylatexenc
