@@ -18,110 +18,32 @@ High-level algorithm (one SMC run):
             block tokens for every particle.
         4.  Resample if ESS < threshold · N.
     Return weighted particle set; draw final answer.
+
+Code sources:
+    KV-cache utilities and SMC primitives adapted from:
+        power_smc/Power-SMC/smc_samp_utils.py
+    Block generation helpers copied from:
+        fast_dllm/Fast-dLLM/llada/generate.py
+    Weight update (compute_block_log_weight) is new.
 """
+
+from __future__ import annotations
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
+from .types import BlockDiffusionSMCConfig
+from .power_smc_utils.kv_cache_utils import truncate_kv_to_prefix, reorder_kv, expand_kv
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1.  Configuration
-# ──────────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class BlockDiffusionSMCConfig:
-    # power-smc parameters
-    alpha: float = 2.0
-    n_particles: int = 16
-    ess_threshold: float = 0.5
-
-    # Block diffusion parameters
-    gen_length: int = 128  
-    block_length: int = 128
-    steps_per_block: int = 128
-    temperature: float = 0.,
-    remasking: str  = 'low_confidence', 
-    mask_id: int = 126336, 
-    
-    threshold: Optional[float] = None  
-    factor: Optional[float] = None 
+from .power_smc_utils.smc_utils import effective_sample_size, systematic_resample
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2.  KV-cache utilities
-#     Adapted from Power-SMC/smc_samp_utils.py
-#     Simplified for the tuple-of-tuples format used by LLaDA / HuggingFace.
-#     Each entry: past_key_values[layer] = (keys, values)
-#                 keys / values shape: (batch, n_heads, seq_len, head_dim)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def truncate_kv_to_prefix(
-    past_key_values: Tuple, prefix_len: int
-) -> Tuple:
-    """Keep only the first `prefix_len` positions of each KV tensor."""
-    return tuple(
-        tuple(t[:, :, :prefix_len, :] for t in layer_kv)
-        for layer_kv in past_key_values
-    )
-
-
-def reorder_kv(past_key_values: Tuple, idx: torch.Tensor) -> Tuple:
-    """
-    Reorder the batch dimension of KV caches according to `idx`.
-    Used after resampling to align caches with new particle order.
-    idx: 1-D long tensor of length N.
-    """
-    return tuple(
-        tuple(t[idx] for t in layer_kv)
-        for layer_kv in past_key_values
-    )
-
-
-def expand_kv(past_key_values: Tuple, N: int) -> Tuple:
-    """
-    Broadcast a batch-1 KV cache to N particles.
-    Useful for sharing the initial prompt cache.
-    """
-    return tuple(
-        tuple(t.expand(N, -1, -1, -1).contiguous() for t in layer_kv)
-        for layer_kv in past_key_values
-    )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3.  SMC utils
-# ──────────────────────────────────────────────────────────────────────────────
-
-def effective_sample_size(w: torch.Tensor, eps: float = 1e-12) -> float:
-    """ESS = 1 / ∑ w_i^2  (normalized weights)."""
-    w = w.clamp_min(eps)
-    return float(1.0 / torch.sum(w * w).item())
-
-
-def systematic_resample(w: torch.Tensor, generator=None) -> torch.Tensor:
-    """
-    Systematic (low-variance) resampling.
-    w: normalized weights, shape (N,).
-    Returns index tensor of length N.
-    """
-    N = w.numel()
-    device = w.device
-    if generator is None:
-        u0 = torch.rand((), device=device)
-    else:
-        u0 = torch.rand((), device=device, generator=generator)
-    positions = (u0 + torch.arange(N, device=device)) / N
-    cdf = torch.cumsum(w, dim=0)
-    cdf[-1] = 1.0
-    idx = torch.searchsorted(cdf, positions, right=False)
-    return idx.clamp_max(N - 1).to(torch.long)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4.  Block generation utils
+# 4.  Block generation helpers
+#     Copied from fast_dllm/Fast-dLLM/llada/generate.py
 # ──────────────────────────────────────────────────────────────────────────────
 
 def add_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -435,6 +357,11 @@ def smc_block_diffusion(
     }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 7.  Factor-based parallel decoding helper  (Fast-dLLM §3.3 extension)
+#     Included for completeness; mirrors get_transfer_index_dynamic in
+#     fast_dllm/Fast-dLLM/llada/generate.py
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _get_transfer_index_factor(
     logits: torch.Tensor,
@@ -488,8 +415,15 @@ def _get_transfer_index_factor(
     return x0, transfer_index
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 8.  Quick sanity-check / demo
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _demo():
+    """
+    Minimal smoke-test (requires a GPU and the LLaDA model weights).
+    Run with:  python block_diffusion_power_smc.py
+    """
     from transformers import AutoTokenizer, AutoModel
 
     model_name = "GSAI-ML/LLaDA-8B-Instruct"
