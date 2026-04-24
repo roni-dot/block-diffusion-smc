@@ -1,7 +1,7 @@
 import torch
 from transformers import PreTrainedModel, AutoTokenizer
 
-from .types import BlockDiffusionSMCConfig
+from .data_classes import BlockDiffusionSMCConfig
 
 
 @torch.no_grad()

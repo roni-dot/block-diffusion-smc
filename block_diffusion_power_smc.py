@@ -29,153 +29,27 @@ Code sources:
 
 from __future__ import annotations
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
-from .types import BlockDiffusionSMCConfig
-from .power_smc_utils.kv_cache_utils import truncate_kv_to_prefix, reorder_kv, expand_kv
-
-
-from .power_smc_utils.smc_utils import effective_sample_size, systematic_resample
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4.  Block generation helpers
-#     Copied from fast_dllm/Fast-dLLM/llada/generate.py
-# ──────────────────────────────────────────────────────────────────────────────
-
-def add_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
-    """
-    Gumbel-max trick for categorical sampling.
-    temperature=0 → pure argmax (no noise).
-    Uses float64 for numerical stability (per Fast-dLLM).
-    """
-    if temperature == 0:
-        return logits
-    logits = logits.to(torch.float32)
-    noise = torch.rand_like(logits)
-    gumbel_noise = (-torch.log(noise)) ** temperature
-    return logits.exp() / gumbel_noise
-
-
-def get_num_transfer_tokens(
-    block_mask_index: torch.Tensor, steps: int
-) -> torch.Tensor:
-    """
-    Compute per-step token transfer schedule for the current block.
-    block_mask_index: (N, block_length) bool — which positions are still masked.
-    Returns: (N, steps) int — how many tokens to unmask at each step.
-    """
-    device = block_mask_index.device
-    total = block_mask_index.sum(dim=1)              # (N,)
-    base = torch.div(total, steps, rounding_mode="floor")  # (N,)
-    rem = total - base * steps                       # (N,)
-
-    num_transfer = base.unsqueeze(1).expand(-1, steps).to(torch.long)
-    cols = torch.arange(steps, device=device).unsqueeze(0)  # (1, steps)
-    add_mask = cols < rem.unsqueeze(1)               # (N, steps)
-    return num_transfer + add_mask.to(torch.long)
-
-
-def get_transfer_index(
-    logits: torch.Tensor,
-    temperature: float,
-    remasking: str,
-    mask_index: torch.Tensor,   # (N, L) bool
-    x: torch.Tensor,            # (N, L) long
-    num_transfer_tokens,        # (N,) long tensor, or None when threshold is used
-    threshold: Optional[float] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Decide which masked positions to unmask this step.
-    Returns:
-        x0            : (N, L) long — proposed tokens
-        transfer_index: (N, L) bool — positions to update
-    """
-    logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-    x0 = torch.argmax(logits_with_noise, dim=-1)  # (N, L)
-
-    if remasking == "low_confidence":
-        p = F.softmax(logits.to(torch.float32), dim=-1)
-        x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
-    elif remasking == "random":
-        x0_p = torch.rand(x0.shape, device=x0.device, dtype=torch.float32)
-    else:
-        raise NotImplementedError(remasking)
-
-    x0 = torch.where(mask_index, x0, x)
-    neg_inf = torch.tensor(
-        torch.finfo(x0_p.dtype).min, device=x0_p.device, dtype=x0_p.dtype
-    )
-    confidence = torch.where(mask_index, x0_p, neg_inf)  # (N, L)
-
-    if threshold is not None:
-        transfer_index = mask_index & (confidence >= threshold)
-        max_conf = torch.argmax(confidence, dim=1, keepdim=True)
-        force_mask = torch.zeros_like(transfer_index).scatter_(1, max_conf, True)
-        transfer_index = (transfer_index | force_mask) & mask_index
-        return x0, transfer_index
-
-    if num_transfer_tokens is None:
-        raise ValueError("num_transfer_tokens required when threshold is None.")
-
-    if num_transfer_tokens.dim() == 2 and num_transfer_tokens.size(1) == 1:
-        num_transfer_tokens = num_transfer_tokens.squeeze(1)
-    num_transfer_tokens = num_transfer_tokens.to(
-        dtype=torch.long, device=confidence.device
-    ).clamp(min=0)
-
-    N, L = confidence.shape
-    _, idx_sort = torch.sort(confidence, dim=1, descending=True)
-    cols = torch.arange(L, device=confidence.device).unsqueeze(0).expand(N, L)
-    k_exp = num_transfer_tokens.unsqueeze(1).expand(N, L)
-    select_sorted = cols < k_exp
-
-    transfer_int = torch.zeros(N, L, device=confidence.device, dtype=torch.int8)
-    transfer_int = transfer_int.scatter(1, idx_sort, select_sorted.to(torch.int8))
-    transfer_index = transfer_int.bool() & mask_index
-    return x0, transfer_index
+from data_classes import BlockDiffusionSMCConfig
+from power_smc_utils import (
+    truncate_kv_to_prefix,
+    reorder_kv, 
+    expand_kv,
+    effective_sample_size,
+    systematic_resample,
+)
+from fast_dllm_utils.block_generation_utils import (
+    get_transfer_index, 
+    get_num_transfer_tokens, 
+    get_transfer_index_factor,
+)
+from block_diffusion_power_smc_utils import compute_block_log_weight
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5.  Weight update  — NEW  (Eq. 8 from the paper)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def compute_block_log_weight(
-    logits: torch.Tensor,  # (N, L, V) — may be full sequence or pre-sliced block
-    s: int,                # start index into logits (0 when logits is already sliced)
-    e: int,                # end index into logits (exclusive)
-    alpha: float,
-) -> torch.Tensor:
-    """
-    Log weight update for one block under the Mean Field Approximation.
-
-    From Eq. 8:
-        w_update = ∏_{i=s}^{e-1}  ∑_{v ∈ V}  p(x_i=v | prefix)^α
-
-    In log space:
-        log w_update = ∑_{i=s}^{e-1}  logsumexp( α · log p(x_i | prefix) )
-
-    Args:
-        logits: full-sequence logits from the initial forward pass of this block.
-                Shape (N, full_seq_len, V).
-        s, e  : start and end (exclusive) positions of the current block.
-        alpha : sharpening exponent.
-
-    Returns:
-        log_w_update: shape (N,)
-    """
-    block_logits = logits[:, s:e, :].float()             # (N, B, V)
-    log_probs = F.log_softmax(block_logits, dim=-1)      # (N, B, V)
-    # logsumexp(α · log p) = log( ∑_v p^α )  for each position
-    per_pos = torch.logsumexp(alpha * log_probs, dim=-1)  # (N, B)
-    return per_pos.sum(dim=-1)                            # (N,)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 6.  Main SMC function
+#    Main SMC function
 # ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -264,7 +138,7 @@ def smc_block_diffusion(
 
         x_block = x[:, s:e].clone()  # (N, B)
         if cfg.factor is not None:
-            x0_blk, transfer_blk = _get_transfer_index_factor(
+            x0_blk, transfer_blk = get_transfer_index_factor(
                 logits_block, cfg.temperature, cfg.remasking,
                 block_mask_index, x_block, cfg.factor
             )
@@ -300,7 +174,7 @@ def smc_block_diffusion(
             ).logits
 
             if cfg.factor is not None:
-                x0_blk, transfer_blk = _get_transfer_index_factor(
+                x0_blk, transfer_blk = get_transfer_index_factor(
                     logits_blk, cfg.temperature, cfg.remasking,
                     block_mask_idx, block_input, cfg.factor
                 )
@@ -355,120 +229,3 @@ def smc_block_diffusion(
         "chosen_sequence": x[chosen_idx],
         "stats": stats,
     }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 7.  Factor-based parallel decoding helper  (Fast-dLLM §3.3 extension)
-#     Included for completeness; mirrors get_transfer_index_dynamic in
-#     fast_dllm/Fast-dLLM/llada/generate.py
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _get_transfer_index_factor(
-    logits: torch.Tensor,
-    temperature: float,
-    remasking: str,
-    mask_index: torch.Tensor,
-    x: torch.Tensor,
-    factor: float = 1.0,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Factor-based parallel decoding: find largest n such that (n+1)(1 - c^(n)) < factor.
-    """
-    logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-    x0 = torch.argmax(logits_with_noise, dim=-1)
-
-    if remasking == "low_confidence":
-        p = F.softmax(logits.to(torch.float32), dim=-1)
-        x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
-    elif remasking == "random":
-        x0_p = torch.rand(x0.shape, device=x0.device, dtype=torch.float32)
-    else:
-        raise NotImplementedError(remasking)
-
-    x0 = torch.where(mask_index, x0, x)
-    confidence = torch.where(mask_index, x0_p, torch.tensor(-np.inf, dtype=x0_p.dtype, device=x0_p.device))
-
-    transfer_index = torch.zeros_like(x0, dtype=torch.bool)
-    num_masked = mask_index.sum(dim=1, keepdim=True)
-
-    for j in range(confidence.shape[0]):
-        n_tok = int(num_masked[j].item())
-        if n_tok == 0:
-            continue
-        ns = list(range(1, n_tok + 1))
-        threshs = [1.0 - factor / (n + 1) for n in ns]
-        threshs[0] = -1.0  # always unmask at least one token
-
-        sorted_conf = torch.sort(
-            confidence[j][mask_index[j]], descending=True
-        )[0]
-        top_i = 0
-        for top_i in range(len(threshs)):
-            if sorted_conf[top_i] < threshs[top_i]:
-                break
-        if top_i == 0 or top_i == len(threshs) - 1:
-            top_i += 1
-
-        _, sel_idx = torch.topk(confidence[j], k=top_i)
-        transfer_index[j, sel_idx] = True
-
-    return x0, transfer_index
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 8.  Quick sanity-check / demo
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _demo():
-    """
-    Minimal smoke-test (requires a GPU and the LLaDA model weights).
-    Run with:  python block_diffusion_power_smc.py
-    """
-    from transformers import AutoTokenizer, AutoModel
-
-    model_name = "GSAI-ML/LLaDA-8B-Instruct"
-
-    print(f"Loading {model_name} …")
-   
-    from llada.model import LLaDAModelLM
-    
-
-    model = (
-        LLaDAModelLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map="auto")
-        .eval()
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = "What is 157 multiplied by 34?"
-    messages = [{"role": "user", "content": prompt}]
-    prompt_str = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=False
-    )
-    input_ids = torch.tensor(
-        tokenizer(prompt_str)["input_ids"],
-        device=next(model.parameters()).device,
-    ).unsqueeze(0)
-
-    cfg = BlockDiffusionSMCConfig(
-        alpha=2.0,
-        n_particles=16,
-        gen_length=64,
-        block_length=32,
-        steps_per_block=32,
-        temperature=2.0,
-    )
-
-    print(f"Running SMC with N={cfg.n_particles} particles, α={cfg.alpha} …")
-    result = smc_block_diffusion(model, tokenizer, input_ids, cfg)
-
-    answer_ids = result["chosen_sequence"][input_ids.shape[1]:]
-    eos_id = tokenizer.eos_token_id
-    eos_pos = (answer_ids == eos_id).nonzero(as_tuple=True)[0]
-    if len(eos_pos):
-        answer_ids = answer_ids[:eos_pos[0]]
-    print("Answer:", tokenizer.decode(answer_ids.tolist(), skip_special_tokens=True))
-    print("Stats:", result["stats"])
-
-
-if __name__ == "__main__":
-    _demo()
