@@ -34,6 +34,9 @@ from typing import Any, Dict
 
 from data_classes import BlockDiffusionSMCConfig
 from power_smc_utils import (
+    truncate_kv_to_prefix,
+    reorder_kv,
+    expand_kv,
     effective_sample_size,
     systematic_resample,
 )
@@ -100,6 +103,15 @@ def smc_block_diffusion(
         "resample_at_blocks": [],
     }
 
+    # ── Prompt KV cache: computed once at batch=1, expanded to N ─────────
+    # K/V for position i = W_K·embed(token_i), independent of other tokens,
+    # so the prompt cache never needs to be recomputed across blocks.
+    print(f"│  [fwd] prompt forward pass (batch=1) …", end=" ", flush=True)
+    out_prompt = model(x[:1, :prompt_len], use_cache=True)
+    kv_committed = expand_kv(out_prompt.past_key_values, N)  # (N, prompt_len) K/V
+    del out_prompt
+    print("done")
+
     # ── Outer loop: one iteration per block ───────────────────────────────
     for nb in range(num_blocks):
         s = prompt_len + nb * cfg.block_length   # block start (absolute)
@@ -107,18 +119,19 @@ def smc_block_diffusion(
 
         print(f"┌─ Block {nb+1}/{num_blocks}  (positions {s}–{e-1}) {'─'*30}")
 
-        # ── 6a. Full-sequence forward pass (batched over N particles) ─────
-        print(f"│  [fwd] full-sequence forward pass (batch={N}) …", end=" ", flush=True)
-        out = model(x, use_cache=True)
+        # ── 6a. Forward pass on x[:, s:] only — prefix reused from kv_committed ──
+        # Saves recomputing K/V for positions 0..s-1 which haven't changed.
+        print(f"│  [fwd] forward pass on x[:, s:] (batch={N}) …", end=" ", flush=True)
+        out = model(x[:, s:], past_key_values=kv_committed, use_cache=True)
         print("done")
 
-        # Slice block logits immediately and free the full output to save GPU memory.
-        # Weight update and step-0 denoising only need positions [s, e).
-        logits_block = out.logits[:, s:e, :].contiguous()  # (N, B, V)
-        full_kv = out.past_key_values  # full cache; dual-cache steps patch [s,e) in-place
-        del out  # release full logits; PyTorch reclaims memory lazily
+        # logits for the current block are the first block_length positions in the output.
+        logits_block = out.logits[:, :cfg.block_length, :].contiguous()  # (N, B, V)
+        full_kv = out.past_key_values  # covers 0..total_len-1; dual-cache steps patch [s,e) in-place
+        del out
 
         # ── 6b. Compute log weight update (Eq. 8) ────────────────────────
+        # logits_block is already sliced to shape (N, B, V); s=0, e=block_length.
         log_w_update = compute_block_log_weight(logits_block, 0, cfg.block_length, cfg.alpha)
         log_w = log_w + log_w_update
 
@@ -193,6 +206,11 @@ def smc_block_diffusion(
 
         print(f"│  [den] denoising complete after {steps_run}/{cfg.steps_per_block} steps")
 
+        # Advance committed cache to cover 0..e-1 for next block.
+        # full_kv K/V at [s,e) was updated in-place by replace_position during denoising.
+        kv_committed = truncate_kv_to_prefix(full_kv, e)
+        del full_kv
+
         # ── 6e. Resampling ────────────────────────────────────────────────
         lw = log_w - torch.logsumexp(log_w, dim=0)
         w = torch.exp(lw)
@@ -206,6 +224,7 @@ def smc_block_diffusion(
         if ess < cfg.ess_threshold * N:
             idx_rs = systematic_resample(w, generator=g)
             x = x[idx_rs]
+            kv_committed = reorder_kv(kv_committed, idx_rs)
             log_w = torch.zeros(N, device=device)
             stats["resample_count"] += 1
             stats["resample_at_blocks"].append(nb)
