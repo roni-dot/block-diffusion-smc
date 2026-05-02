@@ -2,11 +2,12 @@
 # 8.  Quick sanity-check / demo
 # ──────────────────────────────────────────────────────────────────────────────
 
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 import torch
 
-from main_loop import smc_block_diffusion
+from block_diffusion_power_smc import smc_block_diffusion
 from data_classes import BlockDiffusionSMCConfig
+from llada.model import LLaDAModelLM
 
 
 def _demo():
@@ -20,14 +21,11 @@ def _demo():
 
     print(f"Loading {model_name} …")
    
-    from llada.model import LLaDAModelLM
-    
-
     model = (
         LLaDAModelLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map="auto")
         .eval()
     )
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
     prompt = "What is 157 multiplied by 34?"
     messages = [{"role": "user", "content": prompt}]

@@ -34,9 +34,6 @@ from typing import Any, Dict
 
 from data_classes import BlockDiffusionSMCConfig
 from power_smc_utils import (
-    truncate_kv_to_prefix,
-    reorder_kv, 
-    expand_kv,
     effective_sample_size,
     systematic_resample,
 )
@@ -55,7 +52,6 @@ from block_diffusion_power_smc_utils import compute_block_log_weight
 @torch.no_grad()
 def smc_block_diffusion(
     model,
-    tokenizer,
     input_ids: torch.Tensor,   # (1, prompt_len)
     cfg: BlockDiffusionSMCConfig,
 ) -> Dict[str, Any]:
@@ -98,7 +94,8 @@ def smc_block_diffusion(
 
     stats: Dict[str, Any] = {
         "ess_history": [],
-        "log_w_update_history": [],
+        "mean_logw_history": [],
+        "max_logw_history": [],
         "resample_count": 0,
         "resample_at_blocks": [],
     }
@@ -118,14 +115,15 @@ def smc_block_diffusion(
         # Slice block logits immediately and free the full output to save GPU memory.
         # Weight update and step-0 denoising only need positions [s, e).
         logits_block = out.logits[:, s:e, :].contiguous()  # (N, B, V)
-        prefix_kv = truncate_kv_to_prefix(out.past_key_values, s)
+        full_kv = out.past_key_values  # full cache; dual-cache steps patch [s,e) in-place
         del out  # release full logits; PyTorch reclaims memory lazily
 
         # ── 6b. Compute log weight update (Eq. 8) ────────────────────────
         log_w_update = compute_block_log_weight(logits_block, 0, cfg.block_length, cfg.alpha)
         log_w = log_w + log_w_update
 
-        stats["log_w_update_history"].append(log_w_update.mean().item())
+        stats["mean_logw_history"].append(log_w_update.mean().item())
+        stats["max_logw_history"].append(log_w_update.max().item())
         print(f"│  [wt]  log_w_update  mean={log_w_update.mean():.3f}  "
               f"min={log_w_update.min():.3f}  max={log_w_update.max():.3f}")
         print(f"│        per-particle: {log_w_update.tolist()}")
@@ -156,38 +154,41 @@ def smc_block_diffusion(
         print(f"│  [den] step 0: unmasked {tokens_unmasked_step0.tolist()} tokens per particle")
 
         # ── 6d. Block denoising — steps 1 … steps_per_block-1 ────────────
+        # Dual-cache: pass only x[:, s:e] (block_length tokens) each step.
+        # replace_position tells the model to patch positions [s, e) in full_kv
+        # in-place, so attention sees the correct full-sequence context.
+        replace_position = torch.zeros((N, x.shape[1]), dtype=torch.bool, device=device)
+        replace_position[:, s:e] = True
+
         steps_run = 1
         for step_i in range(1, cfg.steps_per_block):
-            remaining = (x[:, s:e] == cfg.mask_id).sum()
-            if remaining == 0:
+            if (x[:, s:e] == cfg.mask_id).sum() == 0:
                 break  # block fully unmasked — skip remaining steps
 
-            # Input to the model: current block onwards (prefix handled by KV)
-            block_input = x[:, s:]            # (N, gen_length - nb*block_length)
-            block_mask_idx = (block_input == cfg.mask_id)
-            block_mask_idx[:, cfg.block_length:] = False  # restrict to current block
+            x_block = x[:, s:e].clone()          # (N, B)
+            block_mask_idx = (x_block == cfg.mask_id)  # (N, B)
 
             logits_blk = model(
-                block_input,
-                past_key_values=prefix_kv,
+                x_block,
+                past_key_values=full_kv,
                 use_cache=False,
-            ).logits
+                replace_position=replace_position,
+            ).logits  # (N, B, V)
 
             if cfg.factor is not None:
                 x0_blk, transfer_blk = get_transfer_index_factor(
                     logits_blk, cfg.temperature, cfg.remasking,
-                    block_mask_idx, block_input, cfg.factor
+                    block_mask_idx, x_block, cfg.factor
                 )
             else:
                 x0_blk, transfer_blk = get_transfer_index(
                     logits_blk, cfg.temperature, cfg.remasking,
-                    block_mask_idx, block_input,
+                    block_mask_idx, x_block,
                     num_transfer[:, step_i] if cfg.threshold is None else None,
                     cfg.threshold,
                 )
 
-            block_input_updated = torch.where(transfer_blk, x0_blk, block_input)
-            x = torch.cat([x[:, :s], block_input_updated], dim=1)
+            x[:, s:e] = torch.where(transfer_blk, x0_blk, x_block)
             steps_run += 1
 
         print(f"│  [den] denoising complete after {steps_run}/{cfg.steps_per_block} steps")
