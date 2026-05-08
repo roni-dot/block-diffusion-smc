@@ -22,7 +22,7 @@ def _demo():
     print(f"Loading {model_name} …")
    
     model = (
-        LLaDAModelLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.float16, device_map="auto")
+        LLaDAModelLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map="auto")
         .eval()
     )
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
