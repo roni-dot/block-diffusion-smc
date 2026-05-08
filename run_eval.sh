@@ -53,13 +53,12 @@ run_eval() {
   echo "  Task: ${TASK}   Run: ${label}   N=${n}  α=${alpha}"
   echo "══════════════════════════════════════════════════════"
 
-  CUDA_VISIBLE_DEVICES=0 python -m lm_eval \
+  CUDA_VISIBLE_DEVICES=0 python eval_smc.py \
     --model smc_block_diffusion \
     --model_args "$(common_args),n_particles=${n},alpha=${alpha},ess_threshold=${ESS_THRESHOLD},save_dir=${outdir}/predictions" \
     --tasks "${TASK}" \
     --num_fewshot 5 \
-    --output_path "${outdir}" \
-    --include_path "$(pwd)"   # so lm_eval can find eval_smc.py
+    --output_path "${outdir}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
