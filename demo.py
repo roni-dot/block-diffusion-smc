@@ -22,7 +22,7 @@ def _demo():
     print(f"Loading {model_name} …")
    
     model = (
-        LLaDAModelLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map="auto")
+        LLaDAModelLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.float16, device_map="auto")
         .eval()
     )
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -47,7 +47,7 @@ def _demo():
     )
 
     print(f"Running SMC with N={cfg.n_particles} particles, α={cfg.alpha} …")
-    result = smc_block_diffusion(model, tokenizer, input_ids, cfg)
+    result = smc_block_diffusion(model, input_ids, cfg)
 
     answer_ids = result["chosen_sequence"][input_ids.shape[1]:]
     eos_id = tokenizer.eos_token_id

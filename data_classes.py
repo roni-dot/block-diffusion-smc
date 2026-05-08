@@ -13,9 +13,9 @@ class BlockDiffusionSMCConfig:
     gen_length: int = 128  
     block_length: int = 128
     steps_per_block: int = 128
-    temperature: float = 0.,
-    remasking: str  = 'low_confidence', 
-    mask_id: int = 126336, 
+    temperature: float = 0.
+    remasking: str  = 'low_confidence'
+    mask_id: int = 126336
     
     threshold: Optional[float] = None  
     factor: Optional[float] = None 
