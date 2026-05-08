@@ -11,7 +11,6 @@ set -euo pipefail
 
 MODEL="GSAI-ML/LLaDA-8B-Instruct"
 TASK="${1:-gsm8k}"
-DEVICE="cuda"
 
 # ── Common generation settings ────────────────────────────────────────────────
 GEN_LENGTH=256        # total tokens to generate
@@ -33,7 +32,7 @@ ALPHA_BASE=1.0
 # Helper: shared model_args string (everything except N and alpha)
 # ─────────────────────────────────────────────────────────────────────────────
 common_args() {
-  echo "model_path=${MODEL},temperature=${TEMPERATURE},gen_length=${GEN_LENGTH},block_length=${BLOCK_LENGTH},steps_per_block=${STEPS_PER_BLOCK},remasking=${REMASKING},device=${DEVICE}"
+  echo "model_path=${MODEL},temperature=${TEMPERATURE},gen_length=${GEN_LENGTH},block_length=${BLOCK_LENGTH},steps_per_block=${STEPS_PER_BLOCK},remasking=${REMASKING}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
