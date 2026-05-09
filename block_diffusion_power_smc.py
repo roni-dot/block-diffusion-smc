@@ -136,8 +136,8 @@ def smc_block_diffusion(
         del out
         # Free the previous block's committed KV — full_kv is its superset.
         # This reclaims ~2 GiB with N=16 before the gumbel/denoising ops.
+        # No empty_cache() needed: PyTorch allocator reuses freed memory immediately.
         del kv_committed
-        torch.cuda.empty_cache()
 
         # ── 6b. Compute log weight update (Eq. 8) ────────────────────────
         # logits_block is already sliced to shape (N, B, V); s=0, e=block_length.
