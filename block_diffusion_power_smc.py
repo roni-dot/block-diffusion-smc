@@ -79,11 +79,13 @@ def smc_block_diffusion(
     num_blocks = cfg.gen_length // cfg.block_length
     g = torch.Generator(device=device)
 
-    print(f"\n{'='*60}")
-    print(f"  Power-SMC  |  N={N} particles  α={cfg.alpha}  blocks={num_blocks}x{cfg.block_length}tok")
-    print(f"  prompt_len={prompt_len}  gen_length={cfg.gen_length}  steps/block={cfg.steps_per_block}")
-    print(f"  ESS threshold={cfg.ess_threshold*N:.1f}  temperature={cfg.temperature}")
-    print(f"{'='*60}\n")
+    v = cfg.verbose
+    if v:
+        print(f"\n{'='*60}")
+        print(f"  Power-SMC  |  N={N} particles  α={cfg.alpha}  blocks={num_blocks}x{cfg.block_length}tok")
+        print(f"  prompt_len={prompt_len}  gen_length={cfg.gen_length}  steps/block={cfg.steps_per_block}")
+        print(f"  ESS threshold={cfg.ess_threshold*N:.1f}  temperature={cfg.temperature}")
+        print(f"{'='*60}\n")
 
     # ── Initialise particle sequences (all answer positions are [MASK]) ────
     # x: (N, prompt_len + gen_length)
@@ -106,24 +108,24 @@ def smc_block_diffusion(
     # ── Prompt KV cache: computed once at batch=1, expanded to N ─────────
     # K/V for position i = W_K·embed(token_i), independent of other tokens,
     # so the prompt cache never needs to be recomputed across blocks.
-    print(f"│  [fwd] prompt forward pass (batch=1) …", end=" ", flush=True)
+    if v: print(f"│  [fwd] prompt forward pass (batch=1) …", end=" ", flush=True)
     out_prompt = model(x[:1, :prompt_len], use_cache=True)
     kv_committed = expand_kv(out_prompt.past_key_values, N)  # (N, prompt_len) K/V
     del out_prompt
-    print("done")
+    if v: print("done")
 
     # ── Outer loop: one iteration per block ───────────────────────────────
     for nb in range(num_blocks):
         s = prompt_len + nb * cfg.block_length   # block start (absolute)
         e = s + cfg.block_length                 # block end   (exclusive)
 
-        print(f"┌─ Block {nb+1}/{num_blocks}  (positions {s}–{e-1}) {'─'*30}")
+        if v: print(f"┌─ Block {nb+1}/{num_blocks}  (positions {s}–{e-1}) {'─'*30}")
 
         # ── 6a. Forward pass on x[:, s:] only — prefix reused from kv_committed ──
         # Saves recomputing K/V for positions 0..s-1 which haven't changed.
-        print(f"│  [fwd] forward pass on x[:, s:] (batch={N}) …", end=" ", flush=True)
+        if v: print(f"│  [fwd] forward pass on x[:, s:] (batch={N}) …", end=" ", flush=True)
         out = model(x[:, s:], past_key_values=kv_committed, use_cache=True)
-        print("done")
+        if v: print("done")
 
         # logits for the current block are the first block_length positions in the output.
         logits_block = out.logits[:, :cfg.block_length, :].contiguous()  # (N, B, V)
@@ -137,9 +139,10 @@ def smc_block_diffusion(
 
         stats["mean_logw_history"].append(log_w_update.mean().item())
         stats["max_logw_history"].append(log_w_update.max().item())
-        print(f"│  [wt]  log_w_update  mean={log_w_update.mean():.3f}  "
-              f"min={log_w_update.min():.3f}  max={log_w_update.max():.3f}")
-        print(f"│        per-particle: {log_w_update.tolist()}")
+        if v:
+            print(f"│  [wt]  log_w_update  mean={log_w_update.mean():.3f}  "
+                  f"min={log_w_update.min():.3f}  max={log_w_update.max():.3f}")
+            print(f"│        per-particle: {log_w_update.tolist()}")
 
         # ── 6c. Block denoising — step 0 (using block logits) ────────────
         block_mask_index = (x[:, s:e] == cfg.mask_id)           # (N, B)
@@ -163,8 +166,9 @@ def smc_block_diffusion(
         x[:, s:e] = torch.where(transfer_blk, x0_blk, x_block)
         del logits_block, x_block
 
-        tokens_unmasked_step0 = transfer_blk.sum(dim=1)
-        print(f"│  [den] step 0: unmasked {tokens_unmasked_step0.tolist()} tokens per particle")
+        if v:
+            tokens_unmasked_step0 = transfer_blk.sum(dim=1)
+            print(f"│  [den] step 0: unmasked {tokens_unmasked_step0.tolist()} tokens per particle")
 
         # ── 6d. Block denoising — steps 1 … steps_per_block-1 ────────────
         # Dual-cache: pass only x[:, s:e] (block_length tokens) each step.
@@ -204,7 +208,7 @@ def smc_block_diffusion(
             x[:, s:e] = torch.where(transfer_blk, x0_blk, x_block)
             steps_run += 1
 
-        print(f"│  [den] denoising complete after {steps_run}/{cfg.steps_per_block} steps")
+        if v: print(f"│  [den] denoising complete after {steps_run}/{cfg.steps_per_block} steps")
 
         # Advance committed cache to cover 0..e-1 for next block.
         # full_kv K/V at [s,e) was updated in-place by replace_position during denoising.
@@ -217,9 +221,10 @@ def smc_block_diffusion(
         ess = effective_sample_size(w)
         stats["ess_history"].append(ess)
 
-        print(f"│  [wt]  cumulative log_w: {log_w.tolist()}")
-        print(f"│  [wt]  norm weights:     {[f'{v:.3f}' for v in w.tolist()]}")
-        print(f"│  [ess] ESS={ess:.2f}/{N}  (threshold={cfg.ess_threshold*N:.1f})", end="")
+        if v:
+            print(f"│  [wt]  cumulative log_w: {log_w.tolist()}")
+            print(f"│  [wt]  norm weights:     {[f'{w_:.3f}' for w_ in w.tolist()]}")
+            print(f"│  [ess] ESS={ess:.2f}/{N}  (threshold={cfg.ess_threshold*N:.1f})", end="")
 
         if ess < cfg.ess_threshold * N:
             idx_rs = systematic_resample(w, generator=g)
@@ -228,18 +233,19 @@ def smc_block_diffusion(
             log_w = torch.zeros(N, device=device)
             stats["resample_count"] += 1
             stats["resample_at_blocks"].append(nb)
-            print(f"  → RESAMPLING  indices={idx_rs.tolist()}")
+            if v: print(f"  → RESAMPLING  indices={idx_rs.tolist()}")
         else:
-            print("  → no resample")
+            if v: print("  → no resample")
 
-        print(f"└{'─'*55}\n")
+        if v: print(f"└{'─'*55}\n")
 
     # ── Final weighted draw ────────────────────────────────────────────────
     lw_final = log_w - torch.logsumexp(log_w, dim=0)
     w_final = torch.exp(lw_final)
     chosen_idx = int(torch.multinomial(w_final, 1, generator=g).item())
-    print(f"[final] weights: {[f'{v:.3f}' for v in w_final.tolist()]}")
-    print(f"[final] chose particle {chosen_idx}\n")
+    if v:
+        print(f"[final] weights: {[f'{w_:.3f}' for w_ in w_final.tolist()]}")
+        print(f"[final] chose particle {chosen_idx}\n")
 
     return {
         "sequences": x,

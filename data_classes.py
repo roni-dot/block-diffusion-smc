@@ -17,5 +17,6 @@ class BlockDiffusionSMCConfig:
     remasking: str  = 'low_confidence'
     mask_id: int = 126336
     
-    threshold: Optional[float] = None  
-    factor: Optional[float] = None 
+    threshold: Optional[float] = None
+    factor: Optional[float] = None
+    verbose: bool = True

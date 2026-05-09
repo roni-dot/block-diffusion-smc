@@ -13,14 +13,14 @@ MODEL="GSAI-ML/LLaDA-8B-Instruct"
 TASK="${1:-gsm8k}"
 
 # ── Common generation settings ────────────────────────────────────────────────
-GEN_LENGTH=256        # total tokens to generate
+GEN_LENGTH=256        # total tokens to generate (matches Fast-dLLM paper setting)
 BLOCK_LENGTH=32       # tokens per block  (8 blocks of 32)
 STEPS_PER_BLOCK=32    # denoising steps per block
 TEMPERATURE=0.5       # must be > 0 for particle diversity
 REMASKING="low_confidence"
 
 # ── SMC settings ──────────────────────────────────────────────────────────────
-N_PARTICLES=32
+N_PARTICLES=16
 ALPHA=2.0
 ESS_THRESHOLD=0.5     # resample when ESS < 0.5 * N
 
@@ -31,8 +31,10 @@ ALPHA_BASE=1.0
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: shared model_args string (everything except N and alpha)
 # ─────────────────────────────────────────────────────────────────────────────
+SAMPLE=200            # randomly sample this many examples per run (same seed → same subset)
+
 common_args() {
-  echo "model_path=${MODEL},temperature=${TEMPERATURE},gen_length=${GEN_LENGTH},block_length=${BLOCK_LENGTH},steps_per_block=${STEPS_PER_BLOCK},remasking=${REMASKING}"
+  echo "model_path=${MODEL},temperature=${TEMPERATURE},gen_length=${GEN_LENGTH},block_length=${BLOCK_LENGTH},steps_per_block=${STEPS_PER_BLOCK},remasking=${REMASKING},sample=${SAMPLE}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

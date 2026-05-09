@@ -83,11 +83,14 @@ class SMCBlockDiffusionHarness(LM):
         device: str = "cuda",
         save_dir: str = None,
         seed: int = 42,
+        sample: int = None,   # randomly sample this many examples (None = use all / lm_eval --limit)
         **kwargs,
     ):
         super().__init__()
 
         set_seed(seed)
+        self.sample = int(sample) if sample is not None else None
+        self.seed = seed
 
         print(f"Loading {model_path} …")
         self.model = (
@@ -117,6 +120,7 @@ class SMCBlockDiffusionHarness(LM):
             mask_id=int(mask_id),
             threshold=float(threshold) if threshold is not None else None,
             factor=float(factor) if factor is not None else None,
+            verbose=False,  # suppress per-block output during eval
         )
 
         self.save_dir = save_dir
@@ -150,24 +154,47 @@ class SMCBlockDiffusionHarness(LM):
 
     @torch.no_grad()
     def generate_until(self, requests: List[Instance]) -> List[str]:
-        output = []
+        # Random subsample: shuffle with fixed seed, pick first `sample` indices,
+        # process only those, return empty string for the rest.
+        # lm_eval computes accuracy only over the returned non-empty outputs that
+        # it sent us, so we must return one string per request in original order.
+        rng = random.Random(self.seed)
+        all_indices = list(range(len(requests)))
+        rng.shuffle(all_indices)
+        if self.sample is not None and self.sample < len(requests):
+            active_indices = set(all_indices[: self.sample])
+            print(f"Random subsample: processing {self.sample} / {len(requests)} examples (seed={self.seed})")
+        else:
+            active_indices = set(all_indices)
+
+        output = [""] * len(requests)   # pre-fill; only active slots get real answers
         processed_count = 0
+        save_path = None
 
         if self.save_dir is not None:
             os.makedirs(self.save_dir, exist_ok=True)
             save_path = os.path.join(self.save_dir, "predictions.jsonl")
             if os.path.exists(save_path):
                 with open(save_path, "r", encoding="utf-8") as f:
-                    output = [json.loads(line) for line in f]
-                    processed_count = len(output)
+                    saved = [json.loads(line) for line in f]
+                    processed_count = len(saved)
+                    # Restore already-generated answers into the output list.
+                    # Saved entries are in the order they were processed (active_indices order).
+                    active_list = sorted(active_indices)
+                    for idx, entry in zip(active_list[:processed_count], saved):
+                        output[idx] = entry["answer"]
                 print(f"Resuming from {processed_count} saved predictions.")
 
         total_resample_events = 0
         total_time = 0.0
+        n_done = 0
 
         for i, req in enumerate(tqdm(requests, desc="SMC generation")):
-            if i < processed_count:
-                continue
+            if i not in active_indices:
+                continue  # not in random sample — leave output[i] as ""
+
+            if output[i] != "":
+                continue  # already restored from save file
 
             question: str = req.args[0]
             stop_tokens: list = req.args[1].get("until", [])
@@ -192,6 +219,7 @@ class SMCBlockDiffusionHarness(LM):
             result = smc_block_diffusion(self.model, input_ids, self.cfg)
             elapsed = time.time() - t0
             total_time += elapsed
+            n_done += 1
 
             stats = result["stats"]
             total_resample_events += stats["resample_count"]
@@ -199,7 +227,6 @@ class SMCBlockDiffusionHarness(LM):
             # ── Decode answer ──────────────────────────────────────────────
             answer_ids = result["chosen_sequence"][input_ids.shape[1]:]
 
-            # Strip EOS and pad tokens before decoding.
             eos_id = self.tokenizer.eos_token_id
             eos_positions = (answer_ids == eos_id).nonzero(as_tuple=True)[0]
             if len(eos_positions):
@@ -207,32 +234,30 @@ class SMCBlockDiffusionHarness(LM):
 
             answer_text = self.tokenizer.decode(answer_ids.tolist(), skip_special_tokens=True)
 
-            # Honour stop sequences (e.g. "\n\n" for GSM8K).
             for stop_seq in stop_tokens:
                 if stop_seq in answer_text:
                     answer_text = answer_text.split(stop_seq)[0]
 
-            output.append(answer_text)
+            output[i] = answer_text
 
             # ── Per-example log ────────────────────────────────────────────
             print(
-                f"\n[{i+1}/{len(requests)}] "
+                f"\n[{n_done}/{len(active_indices)}] idx={i}  "
                 f"particle={result['chosen_idx']}  "
                 f"weight={result['w'][result['chosen_idx']]:.3f}  "
                 f"resamples={stats['resample_count']}  "
                 f"time={elapsed:.1f}s"
             )
-            print(f"  answer: {answer_text[:120]}")
-            print(
-                f"  ESS history:  {[f'{v:.1f}' for v in stats['ess_history']]}"
-            )
+            print(f"  answer: {answer_text[:400]}")
+            print(f"  ESS history:  {[f'{v:.1f}' for v in stats['ess_history']]}")
 
             # ── Incremental save ───────────────────────────────────────────
-            if self.save_dir is not None:
+            if save_path is not None:
                 with open(save_path, "a", encoding="utf-8") as f:
                     f.write(
                         json.dumps(
                             {
+                                "idx": i,
                                 "answer": answer_text,
                                 "chosen_idx": result["chosen_idx"],
                                 "chosen_weight": float(result["w"][result["chosen_idx"]]),
@@ -245,13 +270,12 @@ class SMCBlockDiffusionHarness(LM):
                         + "\n"
                     )
 
-        n_done = len(requests) - processed_count
         if n_done > 0:
             print(
                 f"\n── Generation complete ──\n"
-                f"  Examples:          {n_done}\n"
-                f"  Total resamplings: {total_resample_events}\n"
-                f"  Avg time / example:{total_time / n_done:.1f}s\n"
+                f"  Examples processed: {n_done}\n"
+                f"  Total resamplings:  {total_resample_events}\n"
+                f"  Avg time / example: {total_time / n_done:.1f}s\n"
             )
 
         return output
