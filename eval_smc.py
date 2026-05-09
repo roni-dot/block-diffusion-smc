@@ -215,8 +215,12 @@ class SMCBlockDiffusionHarness(LM):
             # ── Decode answer ──────────────────────────────────────────────
             answer_ids = result["chosen_sequence"][input_ids.shape[1]:]
 
+            n_masks = (answer_ids == self.cfg.mask_id).sum().item()
             eos_id = self.tokenizer.eos_token_id
             eos_positions = (answer_ids == eos_id).nonzero(as_tuple=True)[0]
+            first_eos = eos_positions[0].item() if len(eos_positions) else None
+            print(f"  [debug] gen_length={len(answer_ids)}  remaining_masks={n_masks}  first_eos={first_eos}")
+
             if len(eos_positions):
                 answer_ids = answer_ids[: eos_positions[0]]
 
