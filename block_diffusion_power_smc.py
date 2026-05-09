@@ -110,8 +110,11 @@ def smc_block_diffusion(
     # so the prompt cache never needs to be recomputed across blocks.
     if v: print(f"│  [fwd] prompt forward pass (batch=1) …", end=" ", flush=True)
     out_prompt = model(x[:1, :prompt_len], use_cache=True)
-    kv_committed = expand_kv(out_prompt.past_key_values, N)  # (N, prompt_len) K/V
+    prompt_kv = out_prompt.past_key_values
     del out_prompt
+    torch.cuda.empty_cache()
+    kv_committed = expand_kv(prompt_kv, N)  # (N, prompt_len) K/V
+    del prompt_kv
     if v: print("done")
 
     # ── Outer loop: one iteration per block ───────────────────────────────
