@@ -93,12 +93,20 @@ class SMCBlockDiffusionHarness(LM):
         self.seed = seed
 
         print(f"Loading {model_path} …")
+        n_gpus = torch.cuda.device_count()
+        if n_gpus > 1:
+            # Split model evenly so each GPU has headroom for batch activations.
+            mem_per_gpu = f"{20 // n_gpus}GiB"
+            max_memory = {i: mem_per_gpu for i in range(n_gpus)}
+        else:
+            max_memory = None
         self.model = (
             LLaDAModelLM.from_pretrained(
                 model_path,
                 trust_remote_code=True,
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
+                max_memory=max_memory,
             )
             .eval()
         )

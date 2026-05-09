@@ -5,7 +5,6 @@
 #
 # Prerequisites:
 #   pip install lm-eval   (lm-evaluation-harness)
-#   CUDA_VISIBLE_DEVICES=0 selects the RTX 3090
 
 set -euo pipefail
 
@@ -20,7 +19,7 @@ TEMPERATURE=0.5       # must be > 0 for particle diversity
 REMASKING="low_confidence"
 
 # ── SMC settings ──────────────────────────────────────────────────────────────
-N_PARTICLES=16
+N_PARTICLES=8
 ALPHA=2.0
 ESS_THRESHOLD=0.5     # resample when ESS < 0.5 * N
 
@@ -54,7 +53,7 @@ run_eval() {
   echo "  Task: ${TASK}   Run: ${label}   N=${n}  α=${alpha}"
   echo "══════════════════════════════════════════════════════"
 
-  CUDA_VISIBLE_DEVICES=0 python eval_smc.py \
+  python eval_smc.py \
     --model smc_block_diffusion \
     --model_args "$(common_args),n_particles=${n},alpha=${alpha},ess_threshold=${ESS_THRESHOLD},save_dir=${outdir}/predictions" \
     --tasks "${TASK}" \
