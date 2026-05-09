@@ -93,9 +93,9 @@ class SMCBlockDiffusionHarness(LM):
         print(f"Loading {model_path} …")
         n_gpus = torch.cuda.device_count()
         if n_gpus > 1:
-            # Split model evenly so each GPU has headroom for batch activations.
-            mem_per_gpu = f"{20 // n_gpus}GiB"
-            max_memory = {i: mem_per_gpu for i in range(n_gpus)}
+            # GPU 0 also holds KV cache for all N particles — give it less model
+            # weight so activations have room. GPU 1 takes the larger model share.
+            max_memory = {0: "8GiB", 1: "20GiB"}
         else:
             max_memory = None
         self.model = (
