@@ -83,13 +83,11 @@ class SMCBlockDiffusionHarness(LM):
         device: str = "cuda",
         save_dir: str = None,
         seed: int = 42,
-        sample: int = None,   # randomly sample this many examples (None = use all / lm_eval --limit)
         **kwargs,
     ):
         super().__init__()
 
         set_seed(seed)
-        self.sample = int(sample) if sample is not None else None
         self.seed = seed
 
         print(f"Loading {model_path} …")
@@ -162,21 +160,8 @@ class SMCBlockDiffusionHarness(LM):
 
     @torch.no_grad()
     def generate_until(self, requests: List[Instance]) -> List[str]:
-        # Random subsample: shuffle with fixed seed, pick first `sample` indices,
-        # process only those, return empty string for the rest.
-        # lm_eval computes accuracy only over the returned non-empty outputs that
-        # it sent us, so we must return one string per request in original order.
-        rng = random.Random(self.seed)
-        all_indices = list(range(len(requests)))
-        rng.shuffle(all_indices)
-        if self.sample is not None and self.sample < len(requests):
-            active_indices = set(all_indices[: self.sample])
-            print(f"Random subsample: processing {self.sample} / {len(requests)} examples (seed={self.seed})")
-        else:
-            active_indices = set(all_indices)
-
-        output = [""] * len(requests)   # pre-fill; only active slots get real answers
-        done_indices = set()             # tracks which request indices are already finished
+        output = [""] * len(requests)
+        done_indices = set()
         save_path = None
 
         if self.save_dir is not None:
@@ -196,9 +181,6 @@ class SMCBlockDiffusionHarness(LM):
         n_done = 0
 
         for i, req in enumerate(tqdm(requests, desc="SMC generation")):
-            if i not in active_indices:
-                continue  # not in random sample — leave output[i] as ""
-
             if i in done_indices:
                 continue  # already completed in a previous run
 
@@ -248,7 +230,7 @@ class SMCBlockDiffusionHarness(LM):
 
             # ── Per-example log ────────────────────────────────────────────
             print(
-                f"\n[{n_done}/{len(active_indices)}] idx={i}  "
+                f"\n[{n_done}/{len(requests)}] idx={i}  "
                 f"particle={result['chosen_idx']}  "
                 f"weight={result['w'][result['chosen_idx']]:.3f}  "
                 f"resamples={stats['resample_count']}  "

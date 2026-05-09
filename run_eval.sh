@@ -30,10 +30,11 @@ ALPHA_BASE=1.0
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: shared model_args string (everything except N and alpha)
 # ─────────────────────────────────────────────────────────────────────────────
-SAMPLE=200            # randomly sample this many examples per run (same seed → same subset)
+SAMPLE=200            # number of examples to evaluate (passed as --limit to lm_eval)
 
 common_args() {
-  echo "model_path=${MODEL},temperature=${TEMPERATURE},gen_length=${GEN_LENGTH},block_length=${BLOCK_LENGTH},steps_per_block=${STEPS_PER_BLOCK},remasking=${REMASKING},sample=${SAMPLE}"
+  local outdir="$1"
+  echo "model_path=${MODEL},temperature=${TEMPERATURE},gen_length=${GEN_LENGTH},block_length=${BLOCK_LENGTH},steps_per_block=${STEPS_PER_BLOCK},remasking=${REMASKING},save_dir=${outdir}/predictions"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,9 +56,10 @@ run_eval() {
 
   python eval_smc.py \
     --model smc_block_diffusion \
-    --model_args "$(common_args),n_particles=${n},alpha=${alpha},ess_threshold=${ESS_THRESHOLD},save_dir=${outdir}/predictions" \
+    --model_args "$(common_args "${outdir}"),n_particles=${n},alpha=${alpha},ess_threshold=${ESS_THRESHOLD}" \
     --tasks "${TASK}" \
     --num_fewshot 5 \
+    --limit "${SAMPLE}" \
     --output_path "${outdir}"
 }
 
