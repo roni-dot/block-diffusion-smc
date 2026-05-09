@@ -176,7 +176,7 @@ class SMCBlockDiffusionHarness(LM):
             active_indices = set(all_indices)
 
         output = [""] * len(requests)   # pre-fill; only active slots get real answers
-        processed_count = 0
+        done_indices = set()             # tracks which request indices are already finished
         save_path = None
 
         if self.save_dir is not None:
@@ -184,14 +184,12 @@ class SMCBlockDiffusionHarness(LM):
             save_path = os.path.join(self.save_dir, "predictions.jsonl")
             if os.path.exists(save_path):
                 with open(save_path, "r", encoding="utf-8") as f:
-                    saved = [json.loads(line) for line in f]
-                    processed_count = len(saved)
-                    # Restore already-generated answers into the output list.
-                    # Saved entries are in the order they were processed (active_indices order).
-                    active_list = sorted(active_indices)
-                    for idx, entry in zip(active_list[:processed_count], saved):
+                    for line in f:
+                        entry = json.loads(line)
+                        idx = entry["idx"]
                         output[idx] = entry["answer"]
-                print(f"Resuming from {processed_count} saved predictions.")
+                        done_indices.add(idx)
+                print(f"Resuming from {len(done_indices)} saved predictions.")
 
         total_resample_events = 0
         total_time = 0.0
@@ -201,8 +199,8 @@ class SMCBlockDiffusionHarness(LM):
             if i not in active_indices:
                 continue  # not in random sample — leave output[i] as ""
 
-            if output[i] != "":
-                continue  # already restored from save file
+            if i in done_indices:
+                continue  # already completed in a previous run
 
             question: str = req.args[0]
             stop_tokens: list = req.args[1].get("until", [])
