@@ -221,11 +221,11 @@ class SMCBlockDiffusionHarness(LM):
             first_eos = eos_positions[0].item() if len(eos_positions) else None
             print(f"  [debug] gen_length={len(answer_ids)}  remaining_masks={n_masks}  first_eos={first_eos}")
 
-            if len(eos_positions):
-                answer_ids = answer_ids[: eos_positions[0]]
-
+            # Decode full sequence — skip_special_tokens=True drops EOS tokens inline
+            # so content after an early EOS (common in masked diffusion) is preserved.
             answer_text = self.tokenizer.decode(answer_ids.tolist(), skip_special_tokens=True)
 
+            print(f"  [debug] full_decoded: {answer_text[:300]!r}")
             for stop_seq in stop_tokens:
                 if stop_seq in answer_text:
                     answer_text = answer_text.split(stop_seq)[0]
