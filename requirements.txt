@@ -10,3 +10,4 @@ huggingface_hub
 tqdm
 sympy
 pylatexenc
+lm_eval == 0.4.11
