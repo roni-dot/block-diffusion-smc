@@ -68,10 +68,10 @@ echo "Task: ${TASK}"
 echo "Model: ${MODEL}"
 
 # 1. Baseline
-run_eval "baseline_N1_alpha1" "${N_PARTICLES_BASE}" "${ALPHA_BASE}"
+run_eval "baseline_N1_alpha1_S${SAMPLE}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}"
 
 # 2. Power-SMC
-run_eval "smc_N${N_PARTICLES}_alpha${ALPHA}" "${N_PARTICLES}" "${ALPHA}"
+run_eval "smc_N${N_PARTICLES}_alpha${ALPHA}_S${SAMPLE}" "${N_PARTICLES}" "${ALPHA}"
 
 echo ""
 echo "Results written to results/${TASK}/"
