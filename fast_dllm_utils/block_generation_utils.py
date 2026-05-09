@@ -12,14 +12,13 @@ def add_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     """
     Gumbel-max trick for categorical sampling.
     temperature=0 → pure argmax (no noise).
-    Uses float64 for numerical stability (per Fast-dLLM).
+    In-place ops minimize peak allocation (~500 MiB vs ~1.5 GiB for N=16).
     """
     if temperature == 0:
         return logits
     logits = logits.to(torch.float32)
-    noise = torch.rand_like(logits)
-    gumbel_noise = (-torch.log(noise)) ** temperature
-    return logits.exp() / gumbel_noise
+    noise = torch.rand_like(logits).log_().neg_().pow_(temperature)
+    return logits.exp_().div_(noise)
 
 
 def get_num_transfer_tokens(

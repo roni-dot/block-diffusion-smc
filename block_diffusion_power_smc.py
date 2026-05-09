@@ -134,6 +134,10 @@ def smc_block_diffusion(
         logits_block = out.logits[:, :cfg.block_length, :].contiguous()  # (N, B, V)
         full_kv = out.past_key_values  # covers 0..total_len-1; dual-cache steps patch [s,e) in-place
         del out
+        # Free the previous block's committed KV — full_kv is its superset.
+        # This reclaims ~2 GiB with N=16 before the gumbel/denoising ops.
+        del kv_committed
+        torch.cuda.empty_cache()
 
         # ── 6b. Compute log weight update (Eq. 8) ────────────────────────
         # logits_block is already sliced to shape (N, B, V); s=0, e=block_length.
