@@ -95,7 +95,7 @@ class SMCBlockDiffusionHarness(LM):
         if n_gpus > 1:
             # GPU 0 also holds KV cache for all N particles — give it less model
             # weight so activations have room. GPU 1 takes the larger model share.
-            max_memory = {0: "8GiB", 1: "20GiB"}
+            max_memory = {0: "4GiB", 1: "22GiB"}
         else:
             max_memory = None
         self.model = (
