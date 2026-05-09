@@ -20,8 +20,10 @@ REMASKING="low_confidence"
 # ── SMC settings ──────────────────────────────────────────────────────────────
 N_PARTICLES=16
 ALPHA=2.0
+ALPHA_POWERSMC=4.0    # matches Power-SMC paper: alpha = 1/temp = 1/0.25
 ESS_THRESHOLD=0.5     # resample when ESS < 0.5 * N
-TEMPERATURE=0.5 
+TEMPERATURE=0.5
+TEMPERATURE_POWERSMC=0.25  # matches Power-SMC paper default
 
 # ── Baseline settings (standard block diffusion) ──────────────────────────────
 N_PARTICLES_BASE=1
@@ -71,11 +73,20 @@ run_eval() {
 echo "Task: ${TASK}"
 echo "Model: ${MODEL}"
 
-# 1. Baseline
-run_eval "baseline_N1_alpha1_S${SAMPLE}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE_BASE}"
+# 1. Baseline (temperature=0, greedy — matches Fast-dLLM)
+run_eval "baseline_N1_alpha1_T0_S${SAMPLE}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE_BASE}"
 
-# 2. Power-SMC
+# 2. Baseline (temperature=0.5, same temp as SMC — isolates temperature effect)
+run_eval "baseline_N1_alpha1_T05_S${SAMPLE}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE}"
+
+# 3. Power-SMC N=8
+run_eval "smc_N8_alpha${ALPHA}_S${SAMPLE}" 8 "${ALPHA}" "${TEMPERATURE}"
+
+# 4. Power-SMC N=16
 run_eval "smc_N${N_PARTICLES}_alpha${ALPHA}_S${SAMPLE}" "${N_PARTICLES}" "${ALPHA}" "${TEMPERATURE}"
+
+# 5. Power-SMC N=16 (matches Power-SMC paper: temp=0.25, alpha=4.0)
+run_eval "smc_N${N_PARTICLES}_alpha${ALPHA_POWERSMC}_T025_S${SAMPLE}" "${N_PARTICLES}" "${ALPHA_POWERSMC}" "${TEMPERATURE_POWERSMC}"
 
 echo ""
 echo "Results written to results/${TASK}/"
