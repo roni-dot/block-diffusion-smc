@@ -37,24 +37,35 @@ def _demo():
         device=next(model.parameters()).device,
     ).unsqueeze(0)
 
-    cfg = BlockDiffusionSMCConfig(
+    cfg1 = BlockDiffusionSMCConfig(
+        alpha=1.0,
+        n_particles=1,
+        gen_length=256,
+        block_length=32,
+        steps_per_block=32,
+        temperature=0.0,
+        verbose=True,
+    )
+
+    cfg2 = BlockDiffusionSMCConfig(
         alpha=2.0,
         n_particles=16,
-        gen_length=128,
+        gen_length=256,
         block_length=32,
         steps_per_block=32,
         temperature=0.5,
         verbose=True,
     )
 
-    print(f"Running SMC with N={cfg.n_particles} particles, α={cfg.alpha} …")
-    result = smc_block_diffusion(model, input_ids, cfg)
+    for cfg in [cfg1, cfg2]:
+        print(f"Running SMC with N={cfg.n_particles} particles, α={cfg.alpha} …")
+        result = smc_block_diffusion(model, input_ids, cfg)
 
-    answer_ids = result["chosen_sequence"][input_ids.shape[1]:]
-    # Decode full sequence — skip_special_tokens drops EOS inline but preserves
-    # content after it (masked diffusion places EOS mid-sequence as filler).
-    print("Answer:", tokenizer.decode(answer_ids.tolist(), skip_special_tokens=True))
-    print("Stats:", result["stats"])
+        answer_ids = result["chosen_sequence"][input_ids.shape[1]:]
+        # Decode full sequence — skip_special_tokens drops EOS inline but preserves
+        # content after it (masked diffusion places EOS mid-sequence as filler).
+        print("Answer:", tokenizer.decode(answer_ids.tolist(), skip_special_tokens=True))
+        print("Stats:", result["stats"])
 
 
 if __name__ == "__main__":
