@@ -40,20 +40,19 @@ def _demo():
     cfg = BlockDiffusionSMCConfig(
         alpha=2.0,
         n_particles=16,
-        gen_length=64,
+        gen_length=128,
         block_length=32,
         steps_per_block=32,
-        temperature=2.0,
+        temperature=0.5,
+        verbose=True,
     )
 
     print(f"Running SMC with N={cfg.n_particles} particles, α={cfg.alpha} …")
     result = smc_block_diffusion(model, input_ids, cfg)
 
     answer_ids = result["chosen_sequence"][input_ids.shape[1]:]
-    eos_id = tokenizer.eos_token_id
-    eos_pos = (answer_ids == eos_id).nonzero(as_tuple=True)[0]
-    if len(eos_pos):
-        answer_ids = answer_ids[:eos_pos[0]]
+    # Decode full sequence — skip_special_tokens drops EOS inline but preserves
+    # content after it (masked diffusion places EOS mid-sequence as filler).
     print("Answer:", tokenizer.decode(answer_ids.tolist(), skip_special_tokens=True))
     print("Stats:", result["stats"])
 
