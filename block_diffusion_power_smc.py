@@ -3,19 +3,24 @@ block_diffusion_power_smc.py
 
 Power-SMC applied to Block Diffusion Language Models (LLaDA / Dream).
 
-Implements the weight update derived in "Applying Power-SMC to Block Diffusion":
+Weight update — committed-token log-probability (replaces Eq. 8 Rényi entropy):
 
-    w_update = ∏_{i=n+1}^{n+B} ( ∑_{v ∈ V} p(x_i=v | x_{1:n})^α )   [Eq. 8]
+    log w_update = α × ∑_{i=n+1}^{n+B} log p(x_i_committed | x_{1:n})
 
-Under the Mean Field Approximation the complexity drops from O(|V|^B) to O(B·|V|).
+Computed AFTER denoising, using the initial block forward-pass logits as the
+marginal approximation.  This directly rewards particles that committed
+high-probability tokens, rather than measuring how peaked the marginals were.
+
+Original Eq. 8 (Rényi entropy / partition function) is preserved in
+block_diffusion_power_smc_utils.compute_block_log_weight for reference.
 
 High-level algorithm (one SMC run):
     For each block m = 0 … K-1:
         1.  Full-sequence forward pass on all N particles (batched).
             → produces marginal logits p(x_i | prefix) for every block position.
-        2.  Compute log weight update (Eq. 8) from those marginals.
-        3.  Run block denoising (Fast-dLLM style, prefix-KV cache) to commit
+        2.  Run block denoising (Fast-dLLM style, prefix-KV cache) to commit
             block tokens for every particle.
+        3.  Compute log weight update from the committed tokens' log-probs.
         4.  Resample if ESS < threshold · N.
     Return weighted particle set; draw final answer.
 
@@ -24,12 +29,12 @@ Code sources:
         power_smc/Power-SMC/smc_samp_utils.py
     Block generation helpers copied from:
         fast_dllm/Fast-dLLM/llada/generate.py
-    Weight update (compute_block_log_weight) is new.
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from typing import Any, Dict
 
 from data_classes import BlockDiffusionSMCConfig
@@ -41,11 +46,12 @@ from power_smc_utils import (
     systematic_resample,
 )
 from fast_dllm_utils.block_generation_utils import (
-    get_transfer_index, 
-    get_num_transfer_tokens, 
+    get_transfer_index,
+    get_num_transfer_tokens,
     get_transfer_index_factor,
 )
-from block_diffusion_power_smc_utils import compute_block_log_weight
+# Original Eq. 8 weight (Rényi entropy) — kept for reference / easy revert.
+from block_diffusion_power_smc_utils import compute_block_log_weight  # noqa: F401
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -139,19 +145,7 @@ def smc_block_diffusion(
         # No empty_cache() needed: PyTorch allocator reuses freed memory immediately.
         del kv_committed
 
-        # ── 6b. Compute log weight update (Eq. 8) ────────────────────────
-        # logits_block is already sliced to shape (N, B, V); s=0, e=block_length.
-        log_w_update = compute_block_log_weight(logits_block, 0, cfg.block_length, cfg.alpha)
-        log_w = log_w + log_w_update
-
-        stats["mean_logw_history"].append(log_w_update.mean().item())
-        stats["max_logw_history"].append(log_w_update.max().item())
-        if v:
-            print(f"│  [wt]  log_w_update  mean={log_w_update.mean():.3f}  "
-                  f"min={log_w_update.min():.3f}  max={log_w_update.max():.3f}")
-            print(f"│        per-particle: {log_w_update.tolist()}")
-
-        # ── 6c. Block denoising — step 0 (using block logits) ────────────
+        # ── 6b. Block denoising — step 0 (using block logits) ────────────
         block_mask_index = (x[:, s:e] == cfg.mask_id)           # (N, B)
         num_transfer = get_num_transfer_tokens(
             block_mask_index, cfg.steps_per_block
@@ -171,7 +165,7 @@ def smc_block_diffusion(
                 cfg.threshold,
             )
         x[:, s:e] = torch.where(transfer_blk, x0_blk, x_block)
-        del logits_block, x_block
+        del x_block  # keep logits_block alive — needed for weight after full denoising
 
         if v:
             tokens_unmasked_step0 = transfer_blk.sum(dim=1)
@@ -216,6 +210,27 @@ def smc_block_diffusion(
             steps_run += 1
 
         if v: print(f"│  [den] denoising complete after {steps_run}/{cfg.steps_per_block} steps")
+
+        # ── 6c. Committed-token log weight ───────────────────────────────
+        # log w = α × Σ_j log p(x_j_committed | prefix_with_MASK_block)
+        # Uses logits_block from the initial forward pass (all MASK) as the
+        # marginal approximation — same compute, no extra forward pass needed.
+        # Rewards particles that committed high-probability tokens directly.
+        log_probs = F.log_softmax(logits_block.float(), dim=-1)   # (N, B, V)
+        del logits_block
+        committed_log_p = log_probs.gather(
+            -1, x[:, s:e].unsqueeze(-1)
+        ).squeeze(-1)                                              # (N, B)
+        del log_probs
+        log_w_update = cfg.alpha * committed_log_p.sum(dim=-1)    # (N,)
+        log_w = log_w + log_w_update
+
+        stats["mean_logw_history"].append(log_w_update.mean().item())
+        stats["max_logw_history"].append(log_w_update.max().item())
+        if v:
+            print(f"│  [wt]  log_w_update  mean={log_w_update.mean():.3f}  "
+                  f"min={log_w_update.min():.3f}  max={log_w_update.max():.3f}")
+            print(f"│        per-particle: {log_w_update.tolist()}")
 
         # Advance committed cache to cover 0..e-1 for next block.
         # full_kv K/V at [s,e) was updated in-place by replace_position during denoising.
