@@ -16,9 +16,12 @@ block_diffusion_power_smc_utils.compute_block_log_weight for reference.
 
 High-level algorithm (one SMC run):
     For each block m = 0 … K-1:
-        1.  Full-sequence forward pass on all N particles (batched).
-            → produces marginal logits p(x_i | prefix) for every block position.
-        2.  Run block denoising (Fast-dLLM style, prefix-KV cache) to commit
+        1.  Forward pass on x[:, prompt_len:] with fixed prompt KV cache.
+            LLaDA uses BIDIRECTIONAL attention: every token's K/V depends on
+            ALL positions, so we must recompute from the full generation range
+            each block to get correct K/V for previously-committed tokens.
+            → produces marginal logits p(x_i | current sequence) for block m.
+        2.  Run block denoising (Fast-dLLM dual-cache style) to commit
             block tokens for every particle.
         3.  Compute log weight update from the committed tokens' log-probs.
         4.  Resample if ESS < threshold · N.
@@ -39,8 +42,6 @@ from typing import Any, Dict
 
 from data_classes import BlockDiffusionSMCConfig
 from power_smc_utils import (
-    truncate_kv_to_prefix,
-    reorder_kv,
     expand_kv,
     effective_sample_size,
     systematic_resample,
@@ -112,14 +113,15 @@ def smc_block_diffusion(
     }
 
     # ── Prompt KV cache: computed once at batch=1, expanded to N ─────────
-    # K/V for position i = W_K·embed(token_i), independent of other tokens,
-    # so the prompt cache never needs to be recomputed across blocks.
+    # Prompt tokens never change — compute their K/V once and reuse every block.
+    # kv_prompt_N is NEVER modified: all particles share the same prompt, so
+    # resampling only needs to reorder x, not the KV cache.
     if v: print(f"│  [fwd] prompt forward pass (batch=1) …", end=" ", flush=True)
     out_prompt = model(x[:1, :prompt_len], use_cache=True)
     prompt_kv = out_prompt.past_key_values
     del out_prompt
     torch.cuda.empty_cache()
-    kv_committed = expand_kv(prompt_kv, N)  # (N, prompt_len) K/V
+    kv_prompt_N = expand_kv(prompt_kv, N)  # (N, prompt_len) K/V — fixed for all blocks
     del prompt_kv
     if v: print("done")
 
@@ -130,20 +132,21 @@ def smc_block_diffusion(
 
         if v: print(f"┌─ Block {nb+1}/{num_blocks}  (positions {s}–{e-1}) {'─'*30}")
 
-        # ── 6a. Forward pass on x[:, s:] only — prefix reused from kv_committed ──
-        # Saves recomputing K/V for positions 0..s-1 which haven't changed.
-        if v: print(f"│  [fwd] forward pass on x[:, s:] (batch={N}) …", end=" ", flush=True)
-        out = model(x[:, s:], past_key_values=kv_committed, use_cache=True)
+        # ── 6a. Forward pass on x[:, prompt_len:] with fixed prompt KV ──────
+        # LLaDA uses BIDIRECTIONAL attention: K/V at every position depends on
+        # ALL other positions. We cannot carry forward a KV cache built when
+        # future blocks were [MASK] — committed tokens would have stale K/V.
+        # Fix: always recompute the full generation range from the fixed prompt
+        # KV, so every committed token gets fresh K/V given the current sequence.
+        gen_start = nb * cfg.block_length   # offset within generation range
+        if v: print(f"│  [fwd] forward pass on x[:, prompt_len:] (batch={N}) …", end=" ", flush=True)
+        out = model(x[:, prompt_len:], past_key_values=kv_prompt_N, use_cache=True)
         if v: print("done")
 
-        # logits for the current block are the first block_length positions in the output.
-        logits_block = out.logits[:, :cfg.block_length, :].contiguous()  # (N, B, V)
+        # logits for block nb are at gen_start..gen_start+B in the output.
+        logits_block = out.logits[:, gen_start:gen_start+cfg.block_length, :].contiguous()  # (N, B, V)
         full_kv = out.past_key_values  # covers 0..total_len-1; dual-cache steps patch [s,e) in-place
         del out
-        # Free the previous block's committed KV — full_kv is its superset.
-        # This reclaims ~2 GiB with N=16 before the gumbel/denoising ops.
-        # No empty_cache() needed: PyTorch allocator reuses freed memory immediately.
-        del kv_committed
 
         # ── 6b. Block denoising — step 0 (using block logits) ────────────
         block_mask_index = (x[:, s:e] == cfg.mask_id)           # (N, B)
@@ -232,9 +235,7 @@ def smc_block_diffusion(
                   f"min={log_w_update.min():.3f}  max={log_w_update.max():.3f}")
             print(f"│        per-particle: {log_w_update.tolist()}")
 
-        # Advance committed cache to cover 0..e-1 for next block.
-        # full_kv K/V at [s,e) was updated in-place by replace_position during denoising.
-        kv_committed = truncate_kv_to_prefix(full_kv, e)
+        # full_kv is not carried forward — next block recomputes from kv_prompt_N.
         del full_kv
 
         # ── 6e. Resampling ────────────────────────────────────────────────
@@ -251,7 +252,7 @@ def smc_block_diffusion(
         if ess < cfg.ess_threshold * N:
             idx_rs = systematic_resample(w, generator=g)
             x = x[idx_rs]
-            kv_committed = reorder_kv(kv_committed, idx_rs)
+            # kv_prompt_N is identical for all particles (same prompt) — no reorder needed.
             log_w = torch.zeros(N, device=device)
             stats["resample_count"] += 1
             stats["resample_at_blocks"].append(nb)
