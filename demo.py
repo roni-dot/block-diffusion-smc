@@ -40,7 +40,7 @@ def _demo():
     cfg1 = BlockDiffusionSMCConfig(
         alpha=1.0,
         n_particles=1,
-        gen_length=512,
+        gen_length=64,
         block_length=32,
         steps_per_block=32,
         temperature=0.0,
@@ -49,8 +49,8 @@ def _demo():
 
     cfg2 = BlockDiffusionSMCConfig(
         alpha=2.0,
-        n_particles=4,
-        gen_length=512,
+        n_particles=8,
+        gen_length=64,
         block_length=32,
         steps_per_block=32,
         temperature=0.5,
