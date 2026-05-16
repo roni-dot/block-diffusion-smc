@@ -37,7 +37,6 @@ Code sources:
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from typing import Any, Dict
 
 from data_classes import BlockDiffusionSMCConfig
@@ -214,18 +213,15 @@ def smc_block_diffusion(
 
         if v: print(f"│  [den] denoising complete after {steps_run}/{cfg.steps_per_block} steps")
 
-        # ── 6c. Committed-token log weight ───────────────────────────────
-        # log w = α × Σ_j log p(x_j_committed | prefix_with_MASK_block)
-        # Uses logits_block from the initial forward pass (all MASK) as the
-        # marginal approximation — same compute, no extra forward pass needed.
-        # Rewards particles that committed high-probability tokens directly.
-        log_probs = F.log_softmax(logits_block.float(), dim=-1)   # (N, B, V)
+        # ── 6c. Eq. 8 log weight (Rényi partition function) ──────────────
+        # log w = Σ_j log( Σ_v p(x_j=v | prefix)^α )
+        # Computed BEFORE denoising using the initial block logits.
+        # Measures how peaked the model's marginal distribution is at each
+        # block position — does not depend on which tokens were committed.
+        log_w_update = compute_block_log_weight(
+            logits_block, 0, cfg.block_length, cfg.alpha
+        )                                                          # (N,)
         del logits_block
-        committed_log_p = log_probs.gather(
-            -1, x[:, s:e].unsqueeze(-1)
-        ).squeeze(-1)                                              # (N, B)
-        del log_probs
-        log_w_update = cfg.alpha * committed_log_p.sum(dim=-1)    # (N,)
         log_w = log_w + log_w_update
 
         stats["mean_logw_history"].append(log_w_update.mean().item())
