@@ -93,17 +93,26 @@ class SMCBlockDiffusionHarness(LM):
         print(f"Loading {model_path} …")
         n_gpus = torch.cuda.device_count()
         if n_gpus > 1:
-            # GPU 0 also holds KV cache for all N particles — give it less model
-            # weight so activations have room. GPU 1 takes the larger model share.
-            max_memory = {0: "4GiB", 1: "22GiB"}
+            gpu_vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            if gpu_vram_gb >= 40:
+                # High-VRAM GPU (e.g. RTX 6000 Ada, 49 GB): model + KV cache fit on
+                # one GPU — avoid inter-GPU PCIe traffic by pinning everything to GPU 0.
+                device_map = {"": "cuda:0"}
+                max_memory = None
+            else:
+                # Lower-VRAM GPU (e.g. RTX 4090, 24 GB): must split across GPUs.
+                # Give GPU 0 less model weight so it has room for the KV cache.
+                device_map = "auto"
+                max_memory = {0: "4GiB", 1: "22GiB"}
         else:
             max_memory = None
+            device_map = "auto"
         self.model = (
             LLaDAModelLM.from_pretrained(
                 model_path,
                 trust_remote_code=True,
                 torch_dtype=torch.bfloat16,
-                device_map="auto",
+                device_map=device_map,
                 max_memory=max_memory,
             )
             .eval()
