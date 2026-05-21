@@ -13,7 +13,7 @@ TASK="${1:-gsm8k}"
 
 # ── Common generation settings ────────────────────────────────────────────────
 GEN_LENGTH=256        # total tokens to generate (matches Fast-dLLM paper setting)
-BLOCK_LENGTH=32       # tokens per block  (8 blocks of 32)
+BLOCK_LENGTH=8       # tokens per block  (32 blocks of 8)
 STEPS_PER_BLOCK=32    # denoising steps per block
 REMASKING="low_confidence"
 
@@ -75,25 +75,31 @@ echo "Task: ${TASK}"
 echo "Model: ${MODEL}"
 
 # # 1. Baseline (temperature=0, greedy — matches Fast-dLLM)
-# run_eval "baseline_N1_alpha1_T0_S${SAMPLE}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE_BASE}"
+# run_eval "corrected_kv_cache_baseline_N1_alpha1_T0_S${SAMPLE}_BL${BLOCK_LENGTH}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE_BASE}"
 
 # # 2. Baseline (temperature=0.5 — isolates temperature effect)
-# run_eval "baseline_N1_alpha1_T05_S${SAMPLE}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE}"
+# run_eval "baseline_N1_alpha1_T05_S${SAMPLE}_BL${BLOCK_LENGTH}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE}"
 
 # # 3. Baseline (temperature=0.25, same temp as SMC — isolates temperature effect)
-# run_eval "baseline_N1_alpha1_T025_S${SAMPLE}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE_POWERSMC}"
+# run_eval "baseline_N1_alpha1_T025_S${SAMPLE}_BL${BLOCK_LENGTH}" "${N_PARTICLES_BASE}" "${ALPHA_BASE}" "${TEMPERATURE_POWERSMC}"
 
 # # 4. Power-SMC N=4 temp=0.5
-# run_eval "smc_N4_alpha${ALPHA}_T05_S${SAMPLE}" 4 "${ALPHA}" "${TEMPERATURE}"
+# run_eval "equation8_smc_N4_alpha${ALPHA}_T05_S${SAMPLE}_BL${BLOCK_LENGTH}" 4 "${ALPHA}" "${TEMPERATURE}"
 
 # # 5. Power-SMC N=4 (matches Power-SMC paper: temp=0.25, alpha=4.0)
-# run_eval "smc_N4_alpha${ALPHA_POWERSMC}_T025_S${SAMPLE}" 4 "${ALPHA_POWERSMC}" "${TEMPERATURE_POWERSMC}"
+# run_eval "equation8_smc_N4_alpha${ALPHA_POWERSMC}_T025_S${SAMPLE}_BL${BLOCK_LENGTH}" 4 "${ALPHA_POWERSMC}" "${TEMPERATURE_POWERSMC}"
 
-# 6. Power-SMC N=8
-run_eval "smc_N${N_PARTICLES}_alpha${ALPHA}_T05_S${SAMPLE}" "${N_PARTICLES}" "${ALPHA}" "${TEMPERATURE}"
+# 6. Power-SMC N=8 T05
+run_eval "equation8_smc_N${N_PARTICLES}_alpha${ALPHA}_T05_S${SAMPLE}_BL${BLOCK_LENGTH}" "${N_PARTICLES}" "${ALPHA}" "${TEMPERATURE}"
 
 # 7. Power-SMC N=8 (matches Power-SMC paper: temp=0.25, alpha=4.0)
-run_eval "smc_N${N_PARTICLES}_alpha${ALPHA_POWERSMC}_T025_S${SAMPLE}" "${N_PARTICLES}" "${ALPHA_POWERSMC}" "${TEMPERATURE_POWERSMC}"
+run_eval "equation8_smc_N${N_PARTICLES}_alpha${ALPHA_POWERSMC}_T025_S${SAMPLE}_BL${BLOCK_LENGTH}" "${N_PARTICLES}" "${ALPHA_POWERSMC}" "${TEMPERATURE_POWERSMC}"
+
+# 6. Power-SMC N=12 T05 (added N=12 to see if more particles helps)
+run_eval "equation8_smc_N12_alpha${ALPHA}_T05_S${SAMPLE}_BL${BLOCK_LENGTH}" 12 "${ALPHA}" "${TEMPERATURE}"
+
+# 7. Power-SMC N=12 (matches Power-SMC paper: temp=0.25, alpha=4.0)
+run_eval "equation8_smc_N12_alpha${ALPHA_POWERSMC}_T025_S${SAMPLE}_BL${BLOCK_LENGTH}" 12 "${ALPHA_POWERSMC}" "${TEMPERATURE_POWERSMC}"
 
 echo ""
 echo "Results written to results/${TASK}/"
